@@ -3,82 +3,76 @@ from torch import nn, optim
 from torch.distributions import Categorical
 import gymnasium as gym
 
-y = 0.99
-lr = 0.005
-max_steps = 10_000
+class REINFORCE():
+    def __init__(self, env: gym.Env, policy: nn.Module = None, learning_rate=5e-3, discount_factor=0.99):
+        self.env = env
+        if policy is None:
+            self.policy = nn.Sequential(
+            nn.Linear(self.env.observation_space.shape[0], 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.env.action_space.n),
+            nn.Softmax(dim=-1))
+        else:
+            self.policy = policy
 
-env = gym.make("CartPole-v1")
-net = nn.Sequential(
-    nn.Linear(4, 64),
-    nn.ReLU(),
-    nn.Linear(64, 64),
-    nn.ReLU(),
-    nn.Linear(64, env.action_space.n),
-    nn.Softmax(dim=-1)
-)
+        self.discount_factor = discount_factor
+        self.learning_rate = learning_rate
 
-optim = optim.Adam(net.parameters(), lr=lr)
+        self.Actions, self.States, self.Rewards = [], [], []
+        self.optim = optim.Adam(self.policy.parameters(), lr=self.learning_rate)
 
-step = 0
-while step < max_steps:
-    obs, _ = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32)
-    done = False
-    Actions, States, Rewards = [], [], []
+    def train(self):
+        self.policy.train()
+        for t in range(len(self.Rewards)):
+            G = 0.0
+            for k, r in enumerate(self.Rewards[t:]):
+                G += (self.discount_factor ** k) * r
 
-    while not done:
-        probs = net(obs)
-        dist = Categorical(probs)
-        action = dist.sample()
+            state = self.States[t]
+            action = self.Actions[t]
 
-        obs_, reward, terminated, truncated, _ = env.step(action.item())
-        done = terminated or truncated
+            probs = self.policy(state)
+            dist = Categorical(probs)
+            log_prob = dist.log_prob(action)
 
-        Actions.append(action)
-        States.append(obs)
-        Rewards.append(reward)
+            loss = - log_prob * G
 
-        obs = torch.tensor(obs_, dtype=torch.float32)
-        step += 1
+            self.optim.zero_grad()
+            loss.backward()
+            self.optim.step()
+        
 
-    for t in range(len(Rewards)):
-        G = 0.0
-        for k, r in enumerate(Rewards[t:]):
-            G += (y ** k) * r
+    def learn(self, total_timesteps=10_000):
+        step = 0
+        while step < total_timesteps:
+            obs, _ = self.env.reset()
+            obs = torch.tensor(obs, dtype=torch.float32)
+            done = False
+            self.Actions, self.States, self.Rewards = [], [], []
 
-        state = States[t]
-        action = Actions[t]
+            while not done:
+                probs = self.policy(obs)
+                dist = Categorical(probs)
+                action = dist.sample()
 
-        probs = net(state)
-        dist = Categorical(probs)
-        log_prob = dist.log_prob(action)
+                obs_, reward, terminated, truncated, _ = self.env.step(action.item())
+                done = terminated or truncated
 
-        loss = - log_prob * G
+                self.Actions.append(action)
+                self.States.append(obs)
+                self.Rewards.append(reward)
 
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
+                obs = torch.tensor(obs_, dtype=torch.float32)
+                step += 1
 
-env.close()
+            self.train()
+            print(f"timestep: {step}/{total_timesteps}")
 
-env = gym.make("CartPole-v1", render_mode='human')
-for _ in range(5):
-    Rewards = []
-    obs, _ = env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32)
-    done = False
-    env.render()
-
-    while not done:
-        probs = net(obs)
-        dist = Categorical(probs)
-        action = dist.sample()
-
-        obs_, reward, terminated, truncated, _ = env.step(action.item())
-        done = terminated or truncated
-
-        obs = torch.tensor(obs_, dtype=torch.float32)
-        Rewards.append(reward)
-
-    print(f'Reward: {sum(Rewards)}')
-env.close()
+        self.env.close()
+        return self
+    
+    def predict(self, obs):
+        obs = torch.tensor(obs, dtype=torch.float32)
+        return self.policy(obs)
